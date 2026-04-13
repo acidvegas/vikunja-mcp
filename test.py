@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-# PyVikunja - Developed by acidvegas in Python (https://git.acid.vegas)
-# vikunja/test.py
+# Vikunja MCP - Developed by acidvegas in Python (https://git.acid.vegas)
+# vikunja-mcp/test.py
 
+import argparse
 import asyncio
 import json
 import os
@@ -27,7 +28,7 @@ URL   = os.getenv('VIKUNJA_URL', 'http://localhost:3456').rstrip('/')
 TOKEN = os.getenv('VIKUNJA_TOKEN', '')
 
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
-SERVER_PATH = os.path.join(SCRIPT_DIR, 'mcp', 'server.py')
+SERVER_PATH = os.path.join(SCRIPT_DIR, 'server.py')
 
 NOW = datetime.now(timezone.utc)
 
@@ -39,8 +40,8 @@ PROJECT_MEMORY = {
 }
 
 PROJECT_REPO = {
-	'title':       'pyvikunja',
-	'description': 'Per repository project tracking for the PyVikunja codebase.',
+	'title':       'vikunja-mcp',
+	'description': 'Per repository project tracking for the Vikunja MCP codebase.',
 	'hex_color':   '10b981',
 }
 
@@ -384,7 +385,7 @@ async def main():
 			repo   = await ensure_project(session, PROJECT_REPO)
 			home   = await ensure_project(session, PROJECT_HOME)
 			print(f'  Memory    id={memory["id"]}')
-			print(f'  pyvikunja id={repo["id"]}')
+			print(f'  vikunja-mcp id={repo["id"]}')
 			print(f'  home      id={home["id"]}')
 			print()
 
@@ -403,7 +404,7 @@ async def main():
 				print(f'  {task["id"]:>4}  {spec["title"]}')
 			print()
 
-			print('seeding pyvikunja:')
+			print('seeding vikunja-mcp:')
 			for spec in REPO_TODOS:
 				task   = await create_task(session, repo['id'], spec, label_map)
 				status = 'done' if spec.get('done') else 'open'
@@ -434,10 +435,10 @@ async def main():
 			await validate_query(session, 'decisions recorded in memory',
 				{'filter': f'labels = {decision_id}'})
 
-			await validate_query(session, 'open pyvikunja work',
+			await validate_query(session, 'open vikunja-mcp work',
 				{'filter': f'project = {repo["id"]} && done = false'})
 
-			await validate_query(session, 'completed pyvikunja work',
+			await validate_query(session, 'completed vikunja-mcp work',
 				{'filter': f'project = {repo["id"]} && done = true'})
 
 			await validate_query(session, 'open p0 or p1 tasks',
@@ -500,6 +501,75 @@ async def wipe_project_tasks(session, project_id: int):
 			pass
 
 
+async def delete_by_title(session, kind: str, title: str):
+	'''Search for items by title and delete all exact matches via the MCP.
+
+	:param session: Open MCP ClientSession
+	:param kind: Resource type ("projects" or "labels")
+	:param title: Exact title to match
+	'''
+
+	items = await call(session, f'get__{kind}', s=title, per_page=50) or []
+	singular = kind.rstrip('s')
+	found = False
+
+	for item in items:
+		if item.get('title') != title:
+			continue
+		found = True
+		try:
+			await call(session, f'delete__{kind}_id', id=item['id'])
+			print(f'  deleted {singular} \'{title}\' (id {item["id"]})')
+		except RuntimeError as e:
+			print(f'  failed  {singular} \'{title}\' (id {item["id"]}): {e}')
+
+	if not found:
+		print(f'  {singular} \'{title}\' not found')
+
+
+async def wipe():
+	'''Delete all seeded projects and labels through the MCP server.'''
+
+	if not TOKEN:
+		print('error: VIKUNJA_TOKEN is not set in .env')
+		sys.exit(1)
+
+	if not os.path.isfile(SERVER_PATH):
+		print(f'error: mcp server not found at {SERVER_PATH}')
+		sys.exit(1)
+
+	params = StdioServerParameters(
+		command = 'python3',
+		args    = [SERVER_PATH],
+		env     = {**os.environ, 'VIKUNJA_URL': URL, 'VIKUNJA_TOKEN': TOKEN},
+	)
+
+	project_titles = [PROJECT_MEMORY['title'], PROJECT_REPO['title'], PROJECT_HOME['title']]
+	label_titles   = list(LABELS.keys())
+
+	async with stdio_client(params) as (read, write):
+		async with ClientSession(read, write) as session:
+			await session.initialize()
+
+			print('>>> deleting seeded projects (cascades to their tasks)')
+			for title in project_titles:
+				await delete_by_title(session, 'projects', title)
+
+			print()
+			print('>>> deleting seeded labels')
+			for title in label_titles:
+				await delete_by_title(session, 'labels', title)
+
+			print()
+			print('>>> done')
+
 
 if __name__ == '__main__':
-	asyncio.run(main())
+	parser = argparse.ArgumentParser(description='Seed and validate a Vikunja instance through the MCP server')
+	parser.add_argument('-w', '--wipe', action='store_true', help='Delete all seeded projects and labels instead of seeding')
+	args = parser.parse_args()
+
+	if args.wipe:
+		asyncio.run(wipe())
+	else:
+		asyncio.run(main())

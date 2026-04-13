@@ -1,0 +1,197 @@
+Vikunja MCP usage guide.
+
+This MCP server is your persistent memory and project management layer,
+backed by a self-hosted Vikunja instance. You are the only user. Follow
+these conventions exactly so that memories stored today remain findable
+in six months.
+
+VOCABULARY
+  project    container of tasks. One per repo, one for general memory,
+             one per life area. Create once, reuse forever.
+  task       a single unit of work, note, or memory entry. Fields: title,
+             description (markdown), done, priority (1-5), labels,
+             assignees, bucket_id, created, updated.
+  label      a reusable tag. Cross-cutting across all projects. Labels
+             have a numeric id that filters require.
+  view       a saved layout for a project (list, kanban, gantt, table).
+  bucket     a column inside a kanban view (Todo, In Progress, Done, ...).
+  filter     a saved query recallable by id.
+
+TAGGING RULES (MANDATORY)
+
+Labels are the primary recall mechanism. Without discipline here,
+memory becomes unsearchable noise.
+
+  1. Always namespace labels as "namespace:value". The only exceptions
+     are the universal workflow tags listed below.
+     Good: topic:postgres, kind:decision, lang:python
+     Bad:  postgres, decision, python
+
+  2. Always lowercase. "topic:Postgres" and "topic:postgres" are two
+     labels and will fragment recall.
+
+  3. Before creating a label, search with get__labels s=<prefix>. Only
+     create if no match exists. Reuse is the whole point.
+
+  4. Never invent synonyms. Once "topic:postgres" exists, never create
+     "topic:postgresql" or "topic:pg". One canonical form per concept.
+
+  5. Tag aggressively. Every memory gets two to five labels. A decision
+     about Postgres replication for the backend project should carry:
+     topic:postgres, topic:replication, kind:decision, project:backend.
+     More angles means more recall paths.
+
+  6. Cache label ids within a session. Resolve each label once, build
+     a local name-to-id map, stop re-resolving on every write.
+
+CANONICAL NAMESPACES
+
+  topic:<thing>    Technical subjects, tools, concepts, systems.
+                   Examples: topic:postgres, topic:docker, topic:auth,
+                   topic:networking, topic:dns, topic:linux, topic:irc.
+
+  kind:<type>      The shape of the memory entry.
+                   Examples: kind:fact, kind:decision, kind:preference,
+                   kind:reference, kind:snippet, kind:question, kind:todo,
+                   kind:lesson, kind:idea, kind:config, kind:howto.
+
+  lang:<language>  Programming language when relevant.
+                   Examples: lang:python, lang:go, lang:bash, lang:c.
+
+  project:<name>   Scope to a specific codebase or initiative.
+                   Examples: project:backend, project:mcp, project:dotfiles.
+
+  area:<domain>    Broader life or work area.
+                   Examples: area:infra, area:homelab, area:learning,
+                   area:networking, area:security.
+
+  source:<where>   Where the information originated, when it matters.
+                   Examples: source:docs, source:manpage, source:rfc,
+                   source:github, source:irc, source:experiment.
+
+  status:<state>   Temporal relevance markers for things that expire.
+                   Examples: status:current, status:outdated, status:blocked.
+
+Add new namespaces when you genuinely need one. Keep the format
+namespace:value. If you find yourself wanting a namespace that only has
+one or two entries, consider whether an existing namespace covers it.
+
+The following tags are allowed un-namespaced because they are universal
+workflow labels in a repo context: bug, feature, refactor, docs, chore,
+breaking, p0, p1, p2. Do not use these outside code projects.
+
+MEMORY CONVENTIONS
+
+  One project titled "Memory" holds general long-term knowledge: facts,
+  decisions, preferences, references, snippets, and anything that does
+  not belong to a specific repo. Create it on first use if missing.
+  Cache its id for the rest of the session.
+
+  Every memory is a single task:
+    title        short headline, 3 to 10 words. Treat it like a filename.
+    description  full markdown body, arbitrarily long. This is the content.
+    labels       two to five tags following the rules above.
+    priority     1-5, default 2. Reserve 4-5 for truly critical info.
+
+  Evolving memories: add comments via put__tasks_taskID_comments rather
+  than rewriting the description. Comments preserve the timeline.
+
+  Superseded memories: set done=true. They stay searchable but are
+  excluded from default "active" queries.
+
+  NEVER store secrets, credentials, tokens, API keys, or private keys.
+
+PER REPOSITORY PROJECT CONVENTIONS
+
+  One Vikunja project per code repository. Title must match the repo name.
+
+  On first touch:
+    1. get__projects s=<repo_name> to check for an existing project
+    2. If missing, put__projects with {"title": "<repo_name>",
+       "description": "<repo path or url>"}
+    3. Ensure workflow labels exist: bug, feature, refactor, docs,
+       chore, breaking, p0, p1, p2
+
+  Task workflow:
+    - Create tasks via put__projects_id_tasks
+    - Every task gets a type label (bug | feature | refactor | docs | chore)
+      and a priority label (p0 | p1 | p2)
+    - Mark done=true when complete. Never delete. History matters.
+    - Record implementation notes via put__tasks_taskID_comments
+
+  Session startup: call get__tasks with
+  filter="project = <id> && done = false" to see what is in flight.
+
+FILTER SYNTAX (CRITICAL)
+
+  Operators:  =  !=  >  >=  <  <=  like  in
+  Combinators: && (and), || (or). Parentheses for grouping.
+  Strings are double-quoted. Numbers and booleans are bare.
+
+  Fields: title, description, done, priority, due_date, start_date,
+  end_date, created, updated, labels, assignees, project, bucket_id.
+
+  LABEL FILTERS USE NUMERIC IDS, NOT NAMES.
+    1. Resolve each tag name to its id via get__labels s=<tag>
+    2. Filter: labels = 3
+    3. Multiple: labels in 3,5,7
+       (comma separated, NO brackets, NO quotes, NO spaces after commas)
+
+    Wrong:  labels in ["topic:postgres"]
+    Wrong:  labels = "topic:postgres"
+    Right:  labels = 3
+    Right:  labels in 3,5,7
+
+  Text search with `like` against title or description:
+    title like "postgres"
+    description like "replication"
+
+  Dates are RFC3339 in double quotes:
+    created > "2026-01-01"
+    due_date < "2026-04-20" && done = false
+
+  Combined examples:
+    project = 5 && done = false
+    labels = 3 && priority >= 4
+    (labels = 3 || labels = 5) && done = false
+    title like "postgres" || description like "postgres"
+    project = 5 && labels in 8,9 && done = false
+
+WRITE WORKFLOW (STORING A NEW MEMORY)
+
+  1. Decide the tag set. Aim for 2 to 5 labels.
+  2. For each tag, call get__labels s=<tag>. If missing, create with
+     put__labels using a hex_color by namespace:
+       topic=3b82f6  kind=8b5cf6  lang=06b6d4  project=10b981
+       area=f59e0b   source=6b7280  status=ef4444
+     Cache ids for the session.
+  3. Resolve the Memory project id once via get__projects s=Memory.
+  4. Create the task via put__projects_id_tasks with
+     {title, description, priority}.
+  5. Attach each label via put__tasks_task_labels with {"label_id": <id>}.
+  6. Confirm by echoing the stored title and tag set.
+
+READ WORKFLOW (RECALLING MEMORIES)
+
+  1. Translate the question into candidate tags.
+  2. Resolve each tag to its id (cached when possible).
+  3. Build a filter: labels in 3,5,7. Add && done = false unless
+     historical entries are explicitly wanted.
+  4. Call get__tasks with the filter, per_page 5-15.
+  5. Zero hits? Fall back to text search:
+     title like "<keyword>" || description like "<keyword>"
+  6. Surface 1-3 matches concisely. Full descriptions only on request.
+
+DEFAULTS
+  priority   1..5, 5 is highest
+  hex_color  6-char hex, no leading hash
+  done       false by default
+  per_page   keep <= 20 unless a full dump is requested
+  timezone   UTC unless specified otherwise
+
+SAFETY
+  - Always check-or-create for projects and labels. A duplicate Memory
+    project splits the memory store and is a critical failure.
+  - Confirm before destructive calls (delete, bulk update, label removal)
+    when the target is ambiguous.
+  - Verify ids by reading first when intent is vague.

@@ -1,8 +1,8 @@
-# PyVikunja
+# Vikunja MCP
 
 A persistent brain for AI agents.
 
-PyVikunja turns a self hosted [Vikunja](https://vikunja.io) instance into long term memory and project management that any AI agent can read and write. It ships an MCP server that gives the agent a small set of tools for storing facts, tracking work, and recalling exactly what it needs when it needs it. Memories live in a real database instead of your prompt, sessions keep their continuity across days and weeks, and your token bill drops because the agent stops dragging yesterday's context into today's conversation.
+Vikunja MCP turns a self hosted [Vikunja](https://vikunja.io) instance into long term memory and project management that any AI agent can read and write. It ships an MCP server that gives the agent a small set of tools for storing facts, tracking work, and recalling exactly what it needs when it needs it. Memories live in a real database instead of your prompt, sessions keep their continuity across days and weeks, and your token bill drops because the agent stops dragging yesterday's context into today's conversation.
 
 ## Table of Contents
 - [What Problem This Solves](#what-problem-this-solves)
@@ -30,7 +30,7 @@ AI agents forget. Every new session starts from zero, every long session drags i
 1. **Session amnesia.** The agent cannot continue yesterday's work. You re explain the project, the constraints, the decisions, the people, the open bugs. Every morning.
 2. **Token cost.** Long running context lives inside the prompt. You pay for history you already read, every single turn, forever.
 
-PyVikunja fixes both by moving the memory out of the model and into a structured store the model can *query*. Instead of pasting everything you ever told the agent into the system prompt, the agent stores facts once and later asks for the two or three items that are actually relevant to the current question. The storage is Vikunja, the access path is an MCP server, and the shape of what gets stored is not left up to the agent's imagination. See [How Information Is Stored](#how-information-is-stored).
+Vikunja MCP fixes both by moving the memory out of the model and into a structured store the model can *query*. Instead of pasting everything you ever told the agent into the system prompt, the agent stores facts once and later asks for the two or three items that are actually relevant to the current question. The storage is Vikunja, the access path is an MCP server, and the shape of what gets stored is not left up to the agent's imagination. See [How Information Is Stored](#how-information-is-stored).
 
 ## How It Works
 
@@ -43,7 +43,7 @@ PyVikunja fixes both by moving the memory out of the model and into a structured
                               | HTTP
                               |
                     +---------+---------+
-                    |   PyVikunja MCP   |
+                    |   Vikunja MCP     |
                     +---------+---------+
                               |
             +-----------------+-----------------+
@@ -60,7 +60,7 @@ PyVikunja fixes both by moving the memory out of the model and into a structured
 
 The agent speaks MCP. The MCP server speaks the Vikunja REST API. Vikunja stores everything on disk in its own database. Any number of agents *(remote or local, paid or free)* can point at the same MCP server and share the same memory.
 
-PyVikunja supports all three MCP transports — stdio for local subprocess use, SSE for legacy HTTP clients, and Streamable HTTP for modern HTTP clients. Pick whichever your editor or agent supports. See [Transports](#transports) for the details.
+Vikunja MCP supports all three MCP transports — stdio for local subprocess use, SSE for legacy HTTP clients, and Streamable HTTP for modern HTTP clients. Pick whichever your editor or agent supports. See [Transports](#transports) for the details.
 
 ## How Information Is Stored
 
@@ -139,18 +139,18 @@ Storing things is only half the point. The payoff is precise recall that does no
 
 The agent reads memories by calling a single tool with a filter expression. The filter language supports the usual operators and runs against every task field:
 
-| Query intent                            | Filter expression                                    |
+| Query intent                            | Filter expression *(label IDs are examples)*         |
 | --------------------------------------- | ---------------------------------------------------- |
 | All open todos in this repo             | `project = 42 && done = false`                       |
-| High priority bugs across everything    | `labels in ["bug", "p0"] && done = false`            |
-| Everything you know about Alice         | `labels in ["person:alice"]`                         |
-| Decisions made in the last month        | `labels in ["kind:decision"] && created > "2026-03-12"` |
+| High priority bugs across everything    | `labels in 3,7 && done = false`                      |
+| Everything you know about Alice         | `labels = 5`                                         |
+| Decisions made in the last month        | `labels = 8 && created > "2026-03-12"`               |
 | Anything mentioning postgres            | `title like "postgres" \|\| description like "postgres"` |
 | Overdue work                            | `due_date < "now" && done = false`                   |
 
 The agent asks for the narrowest filter it can, pulls the matching 2-5 tasks, and puts only those into its working context. Five tasks of markdown is dozens of tokens, not thousands.
 
-Recall composes with projects and labels naturally. "What do I know about Bob that came up in meetings" is `labels in ["person:bob", "source:meeting"]`. "Open p0 bugs in the backend repo" is `project = <id> && labels in ["bug", "p0"] && done = false`. The agent does not need a search engine because Vikunja's filters are already one.
+Recall composes with projects and labels naturally. "What do I know about Bob that came up in meetings" resolves those two label names to their numeric ids first, then filters with `labels in 4,9`. "Open p0 bugs in the backend repo" is `project = <id> && labels in 3,7 && done = false`. Label names must always be resolved to numeric ids before use in filter expressions. The agent does not need a search engine because Vikunja's filters are already one.
 
 ## The Instructions Payload
 
@@ -170,15 +170,15 @@ The instructions teach the agent:
 
 Think of it as a constitution for the agent's interaction with the store. Every agent that connects reads the same rules and therefore produces the same structure, which means memories written by your local LLM on Monday are perfectly readable by Claude Code on Friday. Shared conventions are what makes multi agent memory work.
 
-The payload lives in `mcp/server.py` as the `INSTRUCTIONS` constant. Edit it to customise conventions for your own workflows *(add new label namespaces, change the Memory project name, enforce stricter safety rules)*. Changes take effect on the next MCP client restart.
+The payload lives in `instructions.txt` at the repo root. Edit it to customise conventions for your own workflows *(add new label namespaces, change the Memory project name, enforce stricter safety rules)*. Changes take effect on the next MCP client restart.
 
 ## Setup
 
 Clone the repository and install dependencies:
 
 ```
-git clone https://github.com/acidvegas/pyvikunja
-cd pyvikunja/mcp
+git clone https://github.com/acidvegas/vikunja-mcp
+cd vikunja-mcp
 pip install -r requirements.txt
 cp .env.example .env
 ```
@@ -200,7 +200,7 @@ You should see `OK` for `/info`, `/user`, `/projects`, and `/tasks`.
 
 ## Transports
 
-MCP defines three transports. PyVikunja speaks all three — pick the one your client supports. stdio is the default, SSE and Streamable HTTP are selected with a CLI flag.
+MCP defines three transports. Vikunja MCP speaks all three — pick the one your client supports. stdio is the default, SSE and Streamable HTTP are selected with a CLI flag.
 
 | Transport       | Use when                                                                                | Launched by          | Endpoint            |
 | --------------- | --------------------------------------------------------------------------------------- | -------------------- | ------------------- |
@@ -233,15 +233,15 @@ Each process is independent and talks to the same Vikunja backend, so memories w
 If you want the network transports to be persistent, run them as a systemd unit. Minimal example *(`/etc/systemd/system/vikunja-mcp.service`)*:
 ```ini
 [Unit]
-Description=PyVikunja MCP server
+Description=Vikunja MCP server
 After=network-online.target
 
 [Service]
 Type=simple
 User=vikunja-mcp
-WorkingDirectory=/opt/pyvikunja
-EnvironmentFile=/opt/pyvikunja/.env
-ExecStart=/usr/bin/python3 /opt/pyvikunja/server.py --transport http --host 127.0.0.1 --port 8000
+WorkingDirectory=/opt/vikunja-mcp
+EnvironmentFile=/opt/vikunja-mcp/.env
+ExecStart=/usr/bin/python3 /opt/vikunja-mcp/server.py --transport http --host 127.0.0.1 --port 8000
 Restart=on-failure
 
 [Install]
@@ -264,7 +264,7 @@ The client launches `server.py` as a subprocess and talks to it over the pipe. S
 	"mcpServers": {
 		"vikunja": {
 			"command": "python3",
-			"args": ["/absolute/path/to/pyvikunja/server.py"],
+			"args": ["/absolute/path/to/vikunja-mcp/server.py"],
 			"env": {
 				"VIKUNJA_URL": "http://localhost:3456",
 				"VIKUNJA_TOKEN": "tk_your_token_here"
@@ -280,7 +280,7 @@ The client launches `server.py` as a subprocess and talks to it over the pipe. S
 	"mcpServers": {
 		"vikunja": {
 			"command": "python3",
-			"args": ["/absolute/path/to/pyvikunja/server.py"],
+			"args": ["/absolute/path/to/vikunja-mcp/server.py"],
 			"env": {
 				"VIKUNJA_URL": "http://localhost:3456",
 				"VIKUNJA_TOKEN": "tk_your_token_here"
@@ -296,7 +296,7 @@ The client launches `server.py` as a subprocess and talks to it over the pipe. S
 	"mcpServers": {
 		"vikunja": {
 			"command": "python3",
-			"args": ["/absolute/path/to/pyvikunja/server.py"],
+			"args": ["/absolute/path/to/vikunja-mcp/server.py"],
 			"env": {
 				"VIKUNJA_URL": "http://localhost:3456",
 				"VIKUNJA_TOKEN": "tk_your_token_here"
@@ -313,7 +313,7 @@ experimental:
     - name: vikunja
       command: python3
       args:
-        - /absolute/path/to/pyvikunja/server.py
+        - /absolute/path/to/vikunja-mcp/server.py
       env:
         VIKUNJA_URL: http://localhost:3456
         VIKUNJA_TOKEN: tk_your_token_here
@@ -433,26 +433,11 @@ All three patterns use the exact same MCP server. The difference is which agent 
 
 Three compounding effects:
 
-1. **Structured recall instead of context stuffing.** Traditional agent memory pastes a wall of text into the system prompt every turn. With PyVikunja the agent filters for the two or three items it actually needs. A user with 500 stored memories can see the difference between 50k tokens per turn and a few hundred.
+1. **Structured recall instead of context stuffing.** Traditional agent memory pastes a wall of text into the system prompt every turn. With Vikunja MCP the agent filters for the two or three items it actually needs. A user with 500 stored memories can see the difference between 50k tokens per turn and a few hundred.
 2. **Session continuity.** Because memory survives across sessions, you stop re explaining yesterday's work every morning. The first message of every session can be "what was I doing" and the answer comes out of Vikunja.
 3. **Free labor.** Routine writes and lookups run on your local model. Frontier model sessions stay focused on reasoning, and only touch memory through tool calls instead of holding it in the prompt.
 
 There is no universal savings number because it depends on how memory heavy your workflows already are. The heavier they are, the bigger the win.
-
-## Troubleshooting
-
-| Symptom                                        | Fix                                                                                  |
-| ---------------------------------------------- | ------------------------------------------------------------------------------------ |
-| MCP client lists no tools                      | Check the client's MCP log, usually a missing `command` path or a bad `env` block    |
-| `HTTP 401 invalid token`                       | Regenerate the API token in Vikunja, update `.env`, restart the MCP client           |
-| `HTTP 404` from a tool call                    | The target id does not exist, verify with a list or search tool first                |
-| Agent creates duplicate Memory projects        | Tell it to look up the Memory project id once per session and reuse it               |
-| Agent invents inconsistent labels              | Strengthen the label namespace rules inside `INSTRUCTIONS`                           |
-| Token usage does not drop                      | You are still pasting memory into prompts, stop doing that and let the agent fetch it |
-| SSE or HTTP client can't connect               | Verify the daemon is running *(`curl http://host:port/sse` or `POST /mcp`)*, check `--host` is reachable, check firewall |
-| SSE client gets stuck "connecting"             | The SSE transport needs `POST /messages/` to be reachable too, not just `GET /sse`. Don't block POSTs at your proxy |
-| Streamable HTTP returns 307 redirect           | Client is posting to `/mcp/` with a trailing slash. Point it at `/mcp` exactly, or allow redirects on the client side |
-| `ModuleNotFoundError: starlette` / `uvicorn`   | Reinstall deps: `pip install -r requirements.txt`. These are only needed for `sse` and `http` transports |
 
 ---
 

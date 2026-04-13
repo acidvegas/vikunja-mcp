@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-# PyVikunja - Developed by acidvegas in Python (https://git.acid.vegas)
-# vikunja/mcp/server.py
+# Vikunja MCP - Developed by acidvegas in Python (https://git.acid.vegas)
+# vikunja-mcp/server.py
 
 import argparse
 import asyncio
 import contextlib
+import logging
 import os
 import re
 
@@ -28,8 +29,17 @@ except ImportError:
 
 load_dotenv()
 
-BASE_URL = os.getenv('VIKUNJA_URL', '').rstrip('/') + '/api/v1'
-TOKEN    = os.getenv('VIKUNJA_TOKEN', '')
+log = logging.getLogger('vikunja-mcp')
+
+_vikunja_url = os.getenv('VIKUNJA_URL', '').rstrip('/')
+if not _vikunja_url:
+	raise SystemExit('VIKUNJA_URL is not set. Export it or add it to .env')
+
+TOKEN = os.getenv('VIKUNJA_TOKEN', '')
+if not TOKEN:
+	raise SystemExit('VIKUNJA_TOKEN is not set. Export it or add it to .env')
+
+BASE_URL = _vikunja_url + '/api/v1'
 SPEC_URL = BASE_URL + '/docs.json'
 HEADERS  = {'Authorization': f'Bearer {TOKEN}', 'Accept': 'application/json'}
 
@@ -152,216 +162,12 @@ ALLOWLIST = frozenset({
 })
 
 
-INSTRUCTIONS = '''Vikunja MCP usage guide.
-
-This MCP server is persistent memory and project management for AI agents,
-backed by a self hosted Vikunja instance. Follow these conventions exactly so
-intents in natural language map cleanly onto API calls and so memories stored
-today remain findable tomorrow.
-
-VOCABULARY
-  project    container of tasks, for long lived areas (memory, a repo, a life
-             area). Create once, reuse forever.
-  task       a single unit of work, bug, note, or memory entry. Fields: title,
-             description (markdown), done, priority (1-5), due_date, labels,
-             assignees, bucket_id, created, updated.
-  label      a tag. Cross cutting, reusable across all projects. Labels have
-             a numeric id that filters require.
-  view       a saved layout for a project (list, kanban, gantt, table).
-  bucket     a column inside a kanban view (Todo, In Progress, Done, ...).
-  filter     a saved query the user can recall by id.
-
-TAGGING RULES (MANDATORY - BAD TAGS MAKE MEMORY UNREADABLE)
-
-Labels are the primary recall mechanism. Discipline here is non negotiable.
-
-  1. Always namespace labels as "namespace:value". Never use bare tags.
-     Good: topic:postgres, person:alice, kind:decision
-     Bad:  postgres, alice, decision
-
-  2. Always lowercase the value. "topic:Postgres" and "topic:postgres" are
-     two separate labels and will fragment memory.
-
-  3. Before creating a label, search for it first with get__labels s=<prefix>.
-     Only create a new label if no match exists. Reuse is the whole point.
-
-  4. Never invent synonyms. Once "topic:postgres" exists, do not create
-     "topic:postgresql" or "topic:pg" or "topic:psql". One canonical form
-     per concept, forever.
-
-  5. Tag aggressively. Every memory gets two to five labels. A fact about
-     Alice using Postgres in a Slack discussion about a deploy decision
-     should carry: person:alice, topic:postgres, topic:deployment,
-     source:slack, kind:decision. More angles, more recall precision.
-
-  6. Cache label ids within a session. Do not re resolve the same label id
-     for every write. Build a local name to id map on first use.
-
-CANONICAL NAMESPACES
-
-  person:<name>    A specific human. Lowercase first name or handle.
-                   Examples: person:alice, person:bob, person:acidvegas.
-
-  topic:<thing>    Technical subject matter, tools, concepts, systems.
-                   Examples: topic:postgres, topic:docker, topic:auth,
-                   topic:deployment, topic:infra, topic:testing.
-
-  source:<where>   Where the memory originated.
-                   Examples: source:slack, source:meeting, source:email,
-                   source:docs, source:ops, source:user.
-
-  kind:<type>      The shape of the memory entry itself.
-                   Examples: kind:fact, kind:decision, kind:preference,
-                   kind:reference, kind:question, kind:todo.
-
-  project:<name>   Scope to a specific codebase or initiative.
-                   Examples: project:backend, project:mcp, project:website.
-
-  area:<domain>    Broader life or work area.
-                   Examples: area:home, area:work, area:learning.
-
-Add new namespaces when you genuinely need one. Keep the format
-namespace:value for everything except the universal per repo workflow tags
-below.
-
-The following tags are allowed un-namespaced because they are universal and
-self explanatory in a repo context: bug, feature, refactor, docs, chore,
-breaking, p0, p1, p2. Do not repurpose these names for non code projects.
-
-MEMORY CONVENTIONS (LONG TERM AGENT MEMORY)
-
-  One project titled "Memory" holds every long term fact, decision,
-  preference, and reference. Create it on first use if missing. Cache its
-  id within the session; do not look it up repeatedly.
-
-  Every memory is a single task:
-    title        short headline, like a filename. 3 to 10 words.
-    description  full markdown body, arbitrarily long. This is the content.
-    labels       two to five tags, following the TAGGING RULES above.
-    priority     1-5, default 2. Use 4 or 5 only for truly load bearing info.
-
-  Updates over time: add a comment via put__tasks_taskID_comments rather
-  than editing the description. Comments preserve how the memory evolved.
-
-  Superseded memories: set done=true. They stay searchable but are filtered
-  out of default "active" queries.
-
-  NEVER store secrets, credentials, tokens, API keys, or private data in
-  memory tasks. The store is not encrypted and any agent or human with
-  Vikunja access can read it.
-
-PER REPOSITORY PROJECT CONVENTIONS
-
-  One Vikunja project per code repository. Project title must exactly match
-  the repo name.
-
-  On first touch for a repo:
-    1. get__projects s=<repo_name> to check for an existing project
-    2. If missing, put__projects with {"title": "<repo_name>",
-       "description": "<repo path or url>"}
-    3. Ensure universal workflow labels exist: bug, feature, refactor, docs,
-       chore, breaking, p0, p1, p2
-
-  Task workflow:
-    - Create tasks via put__projects_id_tasks
-    - Every task gets a type label (bug | feature | refactor | docs | chore)
-      and a priority label (p0 | p1 | p2)
-    - Mark tasks done=true when complete. Never delete them. History matters
-    - Record implementation notes via put__tasks_taskID_comments
-
-  Session startup for a repo: call get__tasks with
-  filter="project = <id> && done = false" before doing anything else so you
-  know what is already in flight.
-
-FILTER SYNTAX (CRITICAL - WRONG SYNTAX RETURNS ERRORS OR NOTHING)
-
-  Operators:  =   !=   >   >=   <   <=   like   in
-  Combinators: && (and), || (or). Group with parentheses when mixing.
-  Strings are double quoted. Numbers and booleans are bare.
-
-  Valid fields: title, description, done, priority, due_date, start_date,
-  end_date, created, updated, labels, assignees, project, bucket_id.
-
-  LABEL FILTERS REQUIRE NUMERIC LABEL IDS.
-  You cannot filter by label title directly. Correct flow:
-    1. Resolve each tag to its numeric id via get__labels s=<tag>
-    2. Filter by id: `labels = 3`
-    3. For OR across multiple labels: `labels in 3,5,7`
-       (comma separated, NO brackets, NO quotes, NO spaces after commas)
-
-    Wrong:  labels in ["topic:postgres"]
-    Wrong:  labels = "topic:postgres"
-    Right:  labels = 3
-    Right:  labels in 3,5,7
-
-  TEXT SEARCH via `like` against title or description. No % wildcards.
-    title like "postgres"
-    description like "deployment"
-
-  DATES are RFC3339 strings in double quotes.
-    due_date < "2026-04-20" && done = false
-    created > "2026-01-01"
-  Use filter_timezone=<IANA zone> when a query spans a day boundary.
-
-  COMBINED EXAMPLES
-    project = 5 && done = false
-    labels = 3 && priority >= 4
-    (labels = 3 || labels = 5) && done = false
-    title like "postgres" || description like "postgres"
-    project = 5 && labels in 8,9 && done = false
-
-WRITE WORKFLOW (STORING A NEW MEMORY)
-
-  1. Decide the tag set using the TAGGING RULES. Aim for 2 to 5 tags.
-  2. For each tag, call get__labels s=<tag>. If missing, create it with
-     put__labels and a sensible hex_color (topic=3b82f6 blue, person=f59e0b
-     amber, kind=8b5cf6 purple, source=6b7280 gray, area=10b981 green).
-     Cache id results for the remainder of the session.
-  3. Resolve the Memory project id once via get__projects s=Memory.
-  4. Call put__projects_id_tasks with id=<memory_project_id> and a task
-     body of {title, description, priority}.
-  5. For each tag, call put__tasks_task_labels with task=<task_id> and
-     body {"label_id": <id>}.
-  6. Confirm by echoing the stored title and tag set back to the user.
-
-READ WORKFLOW (RECALLING MEMORIES)
-
-  1. Translate the user question into a candidate tag set.
-  2. Resolve each tag to its label id via get__labels (cached when possible).
-  3. Build a label id filter: `labels in 3,5,7`. Add `&& done = false`
-     unless the user explicitly wants historical entries.
-  4. Call get__tasks with that filter and per_page between 5 and 15.
-  5. If zero hits, fall back to text search:
-     `title like "<keyword>" || description like "<keyword>"`
-  6. Surface the top 1 to 3 matches concisely. Do not dump full descriptions
-     unless the user asks for detail.
-
-USER AND ASSIGNEE LOOKUP
-  Resolve a username to a user id with get__users s=<partial>. Assign via
-  put__tasks_taskID_assignees with {"user_id": <id>}.
-
-REACTIONS
-  The kind path parameter is "tasks" or "comments". The reaction body is a
-  short emoji or keyword string.
-
-DEFAULTS
-  priority   1..5, 5 is highest
-  hex_color  6 char hex, no leading hash
-  done       false by default
-  per_page   keep <= 20 unless the user asks for a full dump
-  timezone   UTC unless the user specifies otherwise
-
-SAFETY AND IDEMPOTENCY
-  - Always check-or-create for projects and labels. A duplicate Memory
-    project is a critical failure that splits the agent memory store.
-  - Confirm with the user before any destructive call (delete, bulk update,
-    removing a label from a task) when the target is ambiguous.
-  - Verify ids by reading first when the user intent is vague.
-  - Never store secrets, credentials, tokens, or private user data.
-  - Endpoints that manage account security, passwords, tokens, deletion,
-    migrations, and test fixtures are not exposed by this MCP. Do not try
-    to use them.
-'''
+_instructions_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instructions.txt')
+try:
+	with open(_instructions_path, 'r') as f:
+		INSTRUCTIONS = f.read()
+except FileNotFoundError:
+	raise SystemExit(f'instructions file not found: {_instructions_path}')
 
 
 async def build_tools(spec: dict) -> tuple:
@@ -392,10 +198,12 @@ async def build_tools(spec: dict) -> tuple:
 
 			for param in op.get('parameters', []) or []:
 				pname = param['name']
-				loc   = param.get('in')
+				loc = param.get('in')
 
 				if loc == 'body':
-					schema[pname] = {'type': 'object', 'description': f'Request body for {method.upper()} {path}'}
+					body_schema = resolve_body_schema(param, spec)
+					body_schema.setdefault('description', f'Request body for {method.upper()} {path}')
+					schema[pname] = body_schema
 				else:
 					schema[pname] = {'type': openapi_to_json(param.get('type', 'string')), 'description': (param.get('description') or f'{loc} parameter').strip()}
 
@@ -434,19 +242,40 @@ async def call_endpoint(session, spec_op: dict, args: dict) -> str:
 		elif loc == 'body':
 			body = args[pname]
 
+	unresolved = re.findall(r'\{(\w+)\}', path)
+	if unresolved:
+		msg = f'error: missing required path parameters: {", ".join(unresolved)}'
+		log.warning(msg)
+		return msg
+
 	async with session.request(spec_op['method'], BASE_URL + path, params=query or None, json=body, headers=HEADERS) as resp:
 		text = await resp.text()
+
+		if resp.status >= 400:
+			log.warning('%s %s -> HTTP %d', spec_op['method'], path, resp.status)
 
 		return f'HTTP {resp.status}\n{text}'
 
 
 async def load_spec() -> dict:
-	'''Fetch the Vikunja OpenAPI document from the running server.'''
+	'''Fetch the Vikunja OpenAPI document from the running server.
 
-	async with aiohttp.ClientSession() as session:
-		async with session.get(SPEC_URL) as resp:
-			resp.raise_for_status()
-			return await resp.json(content_type=None)
+	Retries up to three times with exponential backoff when the server is
+	temporarily unreachable.
+	'''
+
+	for attempt in range(3):
+		try:
+			async with aiohttp.ClientSession() as session:
+				async with session.get(SPEC_URL, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+					resp.raise_for_status()
+					return await resp.json(content_type=None)
+		except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+			if attempt == 2:
+				raise
+			delay = 2 ** (attempt + 1)
+			log.warning('spec load attempt %d failed (%s), retrying in %ds', attempt + 1, exc, delay)
+			await asyncio.sleep(delay)
 
 
 async def build_server() -> tuple:
@@ -458,8 +287,9 @@ async def build_server() -> tuple:
 
 	spec         = await load_spec()
 	tools, index = await build_tools(spec)
+	log.info('loaded %d tools from vikunja spec', len(tools))
 	server       = Server('vikunja', instructions=INSTRUCTIONS)
-	session      = aiohttp.ClientSession()
+	session      = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
 
 	@server.list_tools()
 	async def _list_tools():
@@ -470,9 +300,12 @@ async def build_server() -> tuple:
 		op = index.get(name)
 
 		if op is None:
+			log.warning('unknown tool requested: %s', name)
 			return [TextContent(type='text', text=f'unknown tool: {name}')]
 
-		return [TextContent(type='text', text=await call_endpoint(session, op, arguments or {}))]
+		log.info('tool call: %s -> %s %s', name, op['method'], op['path'])
+		result = await call_endpoint(session, op, arguments or {})
+		return [TextContent(type='text', text=result)]
 
 	return server, session
 
@@ -512,11 +345,14 @@ def run_sse(host: str, port: int):
 	sse   = SseServerTransport('/messages/')
 	state = {}
 
-	async def handle_sse(request):
-		server = state['server']
-		async with sse.connect_sse(request.scope, request.receive, request._send) as (read, write):
-			await server.run(read, write, server.create_initialization_options())
-		return Response()
+	class SSEApp:
+		async def __call__(self, scope, receive, send):
+			server = state['server']
+			async with sse.connect_sse(scope, receive, send) as (read, write):
+				await server.run(read, write, server.create_initialization_options())
+
+	async def handle_health(_request):
+		return Response('ok', media_type='text/plain')
 
 	@contextlib.asynccontextmanager
 	async def lifespan(_app):
@@ -531,7 +367,8 @@ def run_sse(host: str, port: int):
 	app = Starlette(
 		debug=False,
 		routes=[
-			Route('/sse', endpoint=handle_sse, methods=['GET']),
+			Route('/sse', endpoint=SSEApp()),
+			Route('/health', endpoint=handle_health, methods=['GET']),
 			Mount('/messages/', app=sse.handle_post_message),
 		],
 		lifespan=lifespan,
@@ -555,6 +392,7 @@ def run_http(host: str, port: int):
 		import uvicorn
 		from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 		from starlette.applications             import Starlette
+		from starlette.responses                import Response
 		from starlette.routing                  import Route
 	except ImportError:
 		raise ImportError('missing starlette/uvicorn (pip install starlette uvicorn)')
@@ -566,6 +404,9 @@ def run_http(host: str, port: int):
 
 		async def __call__(self, scope, receive, send):
 			await state['manager'].handle_request(scope, receive, send)
+
+	async def handle_health(_request):
+		return Response('ok', media_type='text/plain')
 
 	@contextlib.asynccontextmanager
 	async def lifespan(_app):
@@ -581,7 +422,10 @@ def run_http(host: str, port: int):
 
 	app = Starlette(
 		debug=False,
-		routes=[Route('/mcp', endpoint=MCPApp())],
+		routes=[
+			Route('/mcp', endpoint=MCPApp()),
+			Route('/health', endpoint=handle_health, methods=['GET']),
+		],
 		lifespan=lifespan,
 	)
 
@@ -591,7 +435,7 @@ def run_http(host: str, port: int):
 def parse_args():
 	'''Parse CLI arguments for transport selection.'''
 
-	parser = argparse.ArgumentParser(description='PyVikunja MCP server', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+	parser = argparse.ArgumentParser(description='Vikunja MCP server', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 	parser.add_argument('--transport', choices=TRANSPORT_CHOICES, default=DEFAULT_TRANSPORT, help='Transport to expose the MCP server over')
 	parser.add_argument('--host',      default=DEFAULT_HOST, help='Host interface for sse and http transports')
 	parser.add_argument('--port',      default=DEFAULT_PORT, type=int, help='TCP port for sse and http transports')
@@ -602,6 +446,7 @@ def parse_args():
 def main():
 	'''Entry point. Dispatch to the selected transport.'''
 
+	logging.basicConfig(level=logging.INFO, format='%(levelname)s %(name)s: %(message)s')
 	args = parse_args()
 
 	if args.transport == 'stdio':
@@ -621,20 +466,72 @@ def openapi_to_json(t: str) -> str:
 	return {'integer': 'integer', 'number': 'number', 'boolean': 'boolean', 'array': 'array', 'file': 'string'}.get(t, 'string')
 
 
+def resolve_ref(spec: dict, ref: str) -> dict:
+	'''Follow a JSON Reference pointer inside an OpenAPI spec.
+
+	:param spec: Full OpenAPI document
+	:param ref: Reference string, e.g. "#/definitions/models.Task"
+	'''
+
+	node = spec
+	for part in ref.lstrip('#/').split('/'):
+		node = node.get(part, {})
+	return node
+
+
+def resolve_body_schema(param: dict, spec: dict) -> dict:
+	'''Build a JSON Schema dict for a body parameter, resolving $ref when present.
+
+	Extracts top-level property names and types from the referenced definition
+	so the LLM knows what fields to include in the request body.
+
+	:param param: OpenAPI body parameter object
+	:param spec: Full OpenAPI document for $ref resolution
+	'''
+
+	schema = param.get('schema', {})
+	if '$ref' in schema:
+		schema = resolve_ref(spec, schema['$ref'])
+
+	if schema.get('type') != 'object' or 'properties' not in schema:
+		return {'type': 'object'}
+
+	props = {}
+	for name, prop in schema.get('properties', {}).items():
+		entry = {'type': openapi_to_json(prop.get('type', 'string'))}
+		if 'description' in prop:
+			entry['description'] = prop['description'].strip()
+		if prop.get('type') == 'array' and 'items' in prop:
+			items = prop['items']
+			if '$ref' in items:
+				items = resolve_ref(spec, items['$ref'])
+			entry['items'] = {'type': openapi_to_json(items.get('type', 'string'))}
+		props[name] = entry
+
+	return {'type': 'object', 'properties': props}
+
+
+SPEC_PATCHES = [
+	('/labels/{id}', 'put', 'post'),
+]
+
+
 def patch_spec(spec: dict):
 	'''Apply known fixes to the upstream Vikunja OpenAPI spec in place.
 
-	Vikunja documents PUT /labels/{id} for label updates but the live server
-	returns 405 and only accepts POST /labels/{id}. Rewrite the operation so
-	the generated MCP tool matches the real server behaviour.
+	Each entry in SPEC_PATCHES is a (path, wrong_method, correct_method) tuple.
+	The operation is moved from the wrong method to the correct one only when
+	the correct method is not already present.
 
 	:param spec: Parsed OpenAPI document to mutate
 	'''
 
-	node = spec.get('paths', {}).get('/labels/{id}')
-
-	if node and 'put' in node and 'post' not in node:
-		node['post'] = node.pop('put')
+	paths = spec.get('paths', {})
+	for path, wrong, correct in SPEC_PATCHES:
+		node = paths.get(path)
+		if node and wrong in node and correct not in node:
+			node[correct] = node.pop(wrong)
+			log.info('spec patch: %s %s -> %s', path, wrong.upper(), correct.upper())
 
 
 def sanitize_name(raw: str) -> str:
