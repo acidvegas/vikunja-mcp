@@ -2,7 +2,9 @@
 # PyVikunja - Developed by acidvegas in Python (https://git.acid.vegas)
 # vikunja/mcp/server.py
 
+import argparse
 import asyncio
+import contextlib
 import os
 import re
 
@@ -30,6 +32,11 @@ BASE_URL = os.getenv('VIKUNJA_URL', '').rstrip('/') + '/api/v1'
 TOKEN    = os.getenv('VIKUNJA_TOKEN', '')
 SPEC_URL = BASE_URL + '/docs.json'
 HEADERS  = {'Authorization': f'Bearer {TOKEN}', 'Accept': 'application/json'}
+
+TRANSPORT_CHOICES = ('stdio', 'sse', 'http')
+DEFAULT_TRANSPORT = os.getenv('VIKUNJA_MCP_TRANSPORT', 'stdio').lower()
+DEFAULT_HOST      = os.getenv('VIKUNJA_MCP_HOST', '127.0.0.1')
+DEFAULT_PORT      = int(os.getenv('VIKUNJA_MCP_PORT', '8000'))
 
 
 # Curated allowlist of endpoints the MCP exposes. Anything not in this set is
@@ -442,8 +449,12 @@ async def load_spec() -> dict:
 			return await resp.json(content_type=None)
 
 
-async def main():
-	'''Start the Vikunja MCP server over stdio.'''
+async def build_server() -> tuple:
+	'''Build a configured MCP Server instance and its backing aiohttp session.
+
+	Returns a (server, aiohttp_session) tuple. The caller is responsible for
+	closing the aiohttp session when the server shuts down.
+	'''
 
 	spec         = await load_spec()
 	tools, index = await build_tools(spec)
@@ -463,11 +474,142 @@ async def main():
 
 		return [TextContent(type='text', text=await call_endpoint(session, op, arguments or {}))]
 
+	return server, session
+
+
+async def run_stdio():
+	'''Serve the MCP protocol over stdio.'''
+
+	server, session = await build_server()
+
 	try:
 		async with stdio_server() as (read, write):
 			await server.run(read, write, server.create_initialization_options())
 	finally:
 		await session.close()
+
+
+def run_sse(host: str, port: int):
+	'''Serve the MCP protocol over the legacy SSE HTTP transport.
+
+	Exposes two endpoints:
+	  GET  /sse       - long-lived Server-Sent Events stream
+	  POST /messages/ - client -> server JSON-RPC messages
+
+	:param host: Interface to bind the HTTP server to
+	:param port: TCP port to listen on
+	'''
+
+	try:
+		import uvicorn
+		from mcp.server.sse         import SseServerTransport
+		from starlette.applications import Starlette
+		from starlette.responses    import Response
+		from starlette.routing      import Mount, Route
+	except ImportError:
+		raise ImportError('missing starlette/uvicorn (pip install starlette uvicorn)')
+
+	sse   = SseServerTransport('/messages/')
+	state = {}
+
+	async def handle_sse(request):
+		server = state['server']
+		async with sse.connect_sse(request.scope, request.receive, request._send) as (read, write):
+			await server.run(read, write, server.create_initialization_options())
+		return Response()
+
+	@contextlib.asynccontextmanager
+	async def lifespan(_app):
+		server, aio_session = await build_server()
+		state['server']     = server
+		state['session']    = aio_session
+		try:
+			yield
+		finally:
+			await aio_session.close()
+
+	app = Starlette(
+		debug=False,
+		routes=[
+			Route('/sse', endpoint=handle_sse, methods=['GET']),
+			Mount('/messages/', app=sse.handle_post_message),
+		],
+		lifespan=lifespan,
+	)
+
+	uvicorn.run(app, host=host, port=port, log_level='info')
+
+
+def run_http(host: str, port: int):
+	'''Serve the MCP protocol over the Streamable HTTP transport.
+
+	Exposes a single endpoint at /mcp that handles both GET (SSE stream for
+	server -> client messages) and POST (client -> server JSON-RPC messages)
+	per the current MCP Streamable HTTP spec.
+
+	:param host: Interface to bind the HTTP server to
+	:param port: TCP port to listen on
+	'''
+
+	try:
+		import uvicorn
+		from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+		from starlette.applications             import Starlette
+		from starlette.routing                  import Route
+	except ImportError:
+		raise ImportError('missing starlette/uvicorn (pip install starlette uvicorn)')
+
+	state = {}
+
+	class MCPApp:
+		'''ASGI wrapper so Starlette treats this as a mounted app rather than a request handler.'''
+
+		async def __call__(self, scope, receive, send):
+			await state['manager'].handle_request(scope, receive, send)
+
+	@contextlib.asynccontextmanager
+	async def lifespan(_app):
+		server, aio_session = await build_server()
+		manager             = StreamableHTTPSessionManager(app=server, event_store=None, json_response=False, stateless=False)
+		state['manager']    = manager
+		state['session']    = aio_session
+		async with manager.run():
+			try:
+				yield
+			finally:
+				await aio_session.close()
+
+	app = Starlette(
+		debug=False,
+		routes=[Route('/mcp', endpoint=MCPApp())],
+		lifespan=lifespan,
+	)
+
+	uvicorn.run(app, host=host, port=port, log_level='info')
+
+
+def parse_args():
+	'''Parse CLI arguments for transport selection.'''
+
+	parser = argparse.ArgumentParser(description='PyVikunja MCP server', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+	parser.add_argument('--transport', choices=TRANSPORT_CHOICES, default=DEFAULT_TRANSPORT, help='Transport to expose the MCP server over')
+	parser.add_argument('--host',      default=DEFAULT_HOST, help='Host interface for sse and http transports')
+	parser.add_argument('--port',      default=DEFAULT_PORT, type=int, help='TCP port for sse and http transports')
+
+	return parser.parse_args()
+
+
+def main():
+	'''Entry point. Dispatch to the selected transport.'''
+
+	args = parse_args()
+
+	if args.transport == 'stdio':
+		asyncio.run(run_stdio())
+	elif args.transport == 'sse':
+		run_sse(args.host, args.port)
+	elif args.transport == 'http':
+		run_http(args.host, args.port)
 
 
 def openapi_to_json(t: str) -> str:
@@ -508,4 +650,4 @@ def sanitize_name(raw: str) -> str:
 
 
 if __name__ == '__main__':
-	asyncio.run(main())
+	main()

@@ -17,6 +17,7 @@ PyVikunja turns a self hosted [Vikunja](https://vikunja.io) instance into long t
 - [How Information Is Recalled](#how-information-is-recalled)
 - [The Instructions Payload](#the-instructions-payload)
 - [Setup](#setup)
+- [Transports](#transports)
 - [Client Configuration](#client-configuration)
 - [Usage Patterns](#usage-patterns)
 - [Token Savings](#token-savings)
@@ -45,18 +46,21 @@ PyVikunja fixes both by moving the memory out of the model and into a structured
                     |   PyVikunja MCP   |
                     +---------+---------+
                               |
-                              | stdio
-                              |
-              +---------------+---------------+
-              |                               |
-     +--------+---------+           +---------+--------+
-     |   Claude Code    |           |   Local LLM      |
-     |   (remote)       |           |   (Ollama,       |
-     |                  |           |    LM Studio)    |
-     +------------------+           +------------------+
+            +-----------------+-----------------+
+            |                 |                 |
+          stdio              SSE          Streamable HTTP
+            |                 |                 |
+     +------+-------+  +------+-------+  +------+--------+
+     | Claude Code  |  | Cursor, n8n, |  | Claude Code,  |
+     | Claude       |  | older MCP    |  | Cursor, and   |
+     | Desktop      |  | clients      |  | modern MCP    |
+     | Local LLMs   |  |              |  | clients       |
+     +--------------+  +--------------+  +---------------+
 ```
 
 The agent speaks MCP. The MCP server speaks the Vikunja REST API. Vikunja stores everything on disk in its own database. Any number of agents *(remote or local, paid or free)* can point at the same MCP server and share the same memory.
+
+PyVikunja supports all three MCP transports — stdio for local subprocess use, SSE for legacy HTTP clients, and Streamable HTTP for modern HTTP clients. Pick whichever your editor or agent supports. See [Transports](#transports) for the details.
 
 ## How Information Is Stored
 
@@ -194,9 +198,65 @@ python3 test.py
 
 You should see `OK` for `/info`, `/user`, `/projects`, and `/tasks`.
 
+## Transports
+
+MCP defines three transports. PyVikunja speaks all three — pick the one your client supports. stdio is the default, SSE and Streamable HTTP are selected with a CLI flag.
+
+| Transport       | Use when                                                                                | Launched by          | Endpoint            |
+| --------------- | --------------------------------------------------------------------------------------- | -------------------- | ------------------- |
+| stdio           | The client runs the server as a subprocess on the same machine. Zero network exposure. | The MCP client       | stdin / stdout      |
+| SSE             | You want a network endpoint compatible with older HTTP clients *(Cursor, n8n, Continue)*. | You, as a daemon     | `GET /sse` + `POST /messages/` |
+| Streamable HTTP | You want the current MCP HTTP transport. Single endpoint, session aware, supports resumable streams. | You, as a daemon     | `POST/GET/DELETE /mcp` |
+
+SSE is the legacy HTTP transport and is on the MCP spec's deprecation path, but it has the widest client support right now. Streamable HTTP is the current spec and is what new clients are adding. Running both gives you maximum compatibility.
+
+**Launching:**
+```
+python3 server.py                                  # stdio (default)
+python3 server.py --transport stdio                # explicit stdio
+python3 server.py --transport sse  --host 0.0.0.0 --port 8000
+python3 server.py --transport http --host 0.0.0.0 --port 8000
+```
+
+The `sse` and `http` modes bind a uvicorn HTTP server on `--host:--port` *(default `127.0.0.1:8000`)*. They can also be set via the `VIKUNJA_MCP_TRANSPORT`, `VIKUNJA_MCP_HOST`, and `VIKUNJA_MCP_PORT` environment variables.
+
+To run both SSE and Streamable HTTP at once, start two processes on different ports *(or put them behind a reverse proxy at different paths)*:
+```
+python3 server.py --transport sse  --port 8000 &
+python3 server.py --transport http --port 8001 &
+```
+
+Each process is independent and talks to the same Vikunja backend, so memories written through one are immediately visible through the other.
+
+### Running SSE or HTTP as a systemd service
+
+If you want the network transports to be persistent, run them as a systemd unit. Minimal example *(`/etc/systemd/system/vikunja-mcp.service`)*:
+```ini
+[Unit]
+Description=PyVikunja MCP server
+After=network-online.target
+
+[Service]
+Type=simple
+User=vikunja-mcp
+WorkingDirectory=/opt/pyvikunja
+EnvironmentFile=/opt/pyvikunja/.env
+ExecStart=/usr/bin/python3 /opt/pyvikunja/server.py --transport http --host 127.0.0.1 --port 8000
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then `systemctl enable --now vikunja-mcp` and point your clients at `http://127.0.0.1:8000/mcp`. Put it behind nginx or Caddy with TLS if you expose it beyond localhost.
+
 ## Client Configuration
 
-The MCP server is launched by the client, not as a standalone daemon. Each client has its own config where you register MCP servers by command line.
+The three transports use different config shapes. stdio clients launch the server as a subprocess. Network clients *(SSE, Streamable HTTP)* connect to an already running daemon by URL. Examples below cover Claude Code, Claude Desktop, Cursor, and local LLMs via Continue. The same principles apply to any other MCP client.
+
+### Stdio
+
+The client launches `server.py` as a subprocess and talks to it over the pipe. Simplest setup, zero network exposure.
 
 **Claude Code** *(`~/.config/claude-code/mcp.json`)*:
 ```json
@@ -204,7 +264,7 @@ The MCP server is launched by the client, not as a standalone daemon. Each clien
 	"mcpServers": {
 		"vikunja": {
 			"command": "python3",
-			"args": ["/absolute/path/to/pyvikunja/mcp/server.py"],
+			"args": ["/absolute/path/to/pyvikunja/server.py"],
 			"env": {
 				"VIKUNJA_URL": "http://localhost:3456",
 				"VIKUNJA_TOKEN": "tk_your_token_here"
@@ -214,13 +274,29 @@ The MCP server is launched by the client, not as a standalone daemon. Each clien
 }
 ```
 
-**Claude Desktop** *(`~/.config/Claude/claude_desktop_config.json` on Linux, equivalent under `~/Library/Application Support/Claude/` on macOS)*:
+**Claude Desktop** *(`~/.config/Claude/claude_desktop_config.json` on Linux, `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS)*:
 ```json
 {
 	"mcpServers": {
 		"vikunja": {
 			"command": "python3",
-			"args": ["/absolute/path/to/pyvikunja/mcp/server.py"],
+			"args": ["/absolute/path/to/pyvikunja/server.py"],
+			"env": {
+				"VIKUNJA_URL": "http://localhost:3456",
+				"VIKUNJA_TOKEN": "tk_your_token_here"
+			}
+		}
+	}
+}
+```
+
+**Cursor** *(`~/.cursor/mcp.json`, or the per project `.cursor/mcp.json`)*:
+```json
+{
+	"mcpServers": {
+		"vikunja": {
+			"command": "python3",
+			"args": ["/absolute/path/to/pyvikunja/server.py"],
 			"env": {
 				"VIKUNJA_URL": "http://localhost:3456",
 				"VIKUNJA_TOKEN": "tk_your_token_here"
@@ -237,13 +313,111 @@ experimental:
     - name: vikunja
       command: python3
       args:
-        - /absolute/path/to/pyvikunja/mcp/server.py
+        - /absolute/path/to/pyvikunja/server.py
       env:
         VIKUNJA_URL: http://localhost:3456
         VIKUNJA_TOKEN: tk_your_token_here
 ```
 
-Any stdio capable MCP client *(Zed, Cursor, LM Studio, generic MCP runners)* uses the same `command` + `args` + `env` shape. Restart the client after editing its config.
+Any stdio capable MCP client *(Zed, LM Studio, generic MCP runners)* uses the same `command` + `args` + `env` shape. Restart the client after editing its config.
+
+### SSE
+
+Start the server as a daemon *(see [Transports](#transports))*, then point your client at the URL. No subprocess, no environment variables in the client config — the server already has `VIKUNJA_URL` and `VIKUNJA_TOKEN` from its own `.env`.
+
+Start the server once:
+```
+python3 server.py --transport sse --host 127.0.0.1 --port 8000
+```
+
+**Claude Code** *(`~/.config/claude-code/mcp.json`)*:
+```json
+{
+	"mcpServers": {
+		"vikunja": {
+			"type": "sse",
+			"url": "http://127.0.0.1:8000/sse"
+		}
+	}
+}
+```
+
+**Cursor** *(`~/.cursor/mcp.json`)*:
+```json
+{
+	"mcpServers": {
+		"vikunja": {
+			"url": "http://127.0.0.1:8000/sse"
+		}
+	}
+}
+```
+
+**Continue** *(`config.yaml`)*:
+```yaml
+experimental:
+  mcpServers:
+    - name: vikunja
+      type: sse
+      url: http://127.0.0.1:8000/sse
+```
+
+Claude Desktop does not support SSE directly — use the Streamable HTTP config below, or wrap the daemon in a stdio shim with [`mcp-proxy`](https://github.com/sparfenyuk/mcp-proxy) if you specifically need SSE.
+
+### Streamable HTTP
+
+Same pattern as SSE. Start the daemon, point the client at the `/mcp` URL. This is the current MCP HTTP transport and is what you should prefer when the client supports it.
+
+Start the server once:
+```
+python3 server.py --transport http --host 127.0.0.1 --port 8000
+```
+
+**Claude Code** *(`~/.config/claude-code/mcp.json`)*:
+```json
+{
+	"mcpServers": {
+		"vikunja": {
+			"type": "http",
+			"url": "http://127.0.0.1:8000/mcp"
+		}
+	}
+}
+```
+
+**Claude Desktop** *(`~/.config/Claude/claude_desktop_config.json`)*:
+```json
+{
+	"mcpServers": {
+		"vikunja": {
+			"type": "streamable-http",
+			"url": "http://127.0.0.1:8000/mcp"
+		}
+	}
+}
+```
+
+**Cursor** *(`~/.cursor/mcp.json`)*:
+```json
+{
+	"mcpServers": {
+		"vikunja": {
+			"url": "http://127.0.0.1:8000/mcp"
+		}
+	}
+}
+```
+
+**Continue** *(`config.yaml`)*:
+```yaml
+experimental:
+  mcpServers:
+    - name: vikunja
+      type: streamable-http
+      url: http://127.0.0.1:8000/mcp
+```
+
+For a local LLM setup where the local model runs on the same box, stdio is still the fastest path *(no TCP overhead, no daemon)*. Use SSE or Streamable HTTP when the client and server are on different machines, when multiple clients need to share one running server, or when you want the server to persist across client restarts.
 
 ## Usage Patterns
 
@@ -275,6 +449,10 @@ There is no universal savings number because it depends on how memory heavy your
 | Agent creates duplicate Memory projects        | Tell it to look up the Memory project id once per session and reuse it               |
 | Agent invents inconsistent labels              | Strengthen the label namespace rules inside `INSTRUCTIONS`                           |
 | Token usage does not drop                      | You are still pasting memory into prompts, stop doing that and let the agent fetch it |
+| SSE or HTTP client can't connect               | Verify the daemon is running *(`curl http://host:port/sse` or `POST /mcp`)*, check `--host` is reachable, check firewall |
+| SSE client gets stuck "connecting"             | The SSE transport needs `POST /messages/` to be reachable too, not just `GET /sse`. Don't block POSTs at your proxy |
+| Streamable HTTP returns 307 redirect           | Client is posting to `/mcp/` with a trailing slash. Point it at `/mcp` exactly, or allow redirects on the client side |
+| `ModuleNotFoundError: starlette` / `uvicorn`   | Reinstall deps: `pip install -r requirements.txt`. These are only needed for `sse` and `http` transports |
 
 ---
 
