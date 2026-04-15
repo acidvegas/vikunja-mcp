@@ -1,5 +1,5 @@
+vikunja-mcp
+/vikunja-mcp.exe
+*.test
+*.out
 .env
-__pycache__/
-*.pyc
-.venv/
-venv/
