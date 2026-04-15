@@ -10,7 +10,7 @@ VOCABULARY
              one per life area. Create once, reuse forever.
   task       a single unit of work, note, or memory entry. Fields: title,
              description (markdown), done, priority (1-5), labels,
-             assignees, bucket_id, created, updated.
+             bucket_id, created, updated.
   label      a reusable tag. Cross-cutting across all projects. Labels
              have a numeric id that filters require.
   view       a saved layout for a project (list, kanban, gantt, table).
@@ -24,8 +24,8 @@ memory becomes unsearchable noise.
 
   1. Always namespace labels as "namespace:value". The only exceptions
      are the universal workflow tags listed below.
-     Good: topic:postgres, kind:decision, lang:python
-     Bad:  postgres, decision, python
+     Good: topic:postgres, kind:decision, area:homelab
+     Bad:  postgres, decision, homelab
 
   2. Always lowercase. "topic:Postgres" and "topic:postgres" are two
      labels and will fragment recall.
@@ -37,48 +37,62 @@ memory becomes unsearchable noise.
      "topic:postgresql" or "topic:pg". One canonical form per concept.
 
   5. Tag aggressively. Every memory gets two to five labels. A decision
-     about Postgres replication for the backend project should carry:
-     topic:postgres, topic:replication, kind:decision, project:backend.
-     More angles means more recall paths.
+     about Postgres replication that you discovered reading the docs
+     should carry: topic:postgres, topic:replication, kind:decision,
+     source:docs. More angles means more recall paths.
 
   6. Cache label ids within a session. Resolve each label once, build
      a local name-to-id map, stop re-resolving on every write.
 
 CANONICAL NAMESPACES
 
-  topic:<thing>    Technical subjects, tools, concepts, systems.
+  topic:<thing>    Technical subjects, tools, concepts, systems,
+                   protocols, anything you might want to recall by
+                   subject matter.
                    Examples: topic:postgres, topic:docker, topic:auth,
-                   topic:networking, topic:dns, topic:linux, topic:irc.
+                   topic:networking, topic:dns, topic:linux, topic:irc,
+                   topic:nginx, topic:zfs, topic:wireguard, topic:bgp,
+                   topic:python, topic:golang, topic:bash.
 
-  kind:<type>      The shape of the memory entry.
+  kind:<type>      The shape of the memory entry. What kind of thing
+                   is this?
                    Examples: kind:fact, kind:decision, kind:preference,
-                   kind:reference, kind:snippet, kind:question, kind:todo,
-                   kind:lesson, kind:idea, kind:config, kind:howto.
+                   kind:reference, kind:snippet, kind:question,
+                   kind:lesson, kind:idea, kind:config, kind:howto,
+                   kind:troubleshoot, kind:workaround.
 
-  lang:<language>  Programming language when relevant.
-                   Examples: lang:python, lang:go, lang:bash, lang:c.
+  repo:<name>      Cross-reference a memory to a specific codebase.
+                   Use ONLY in the Memory project to link a general
+                   memory back to a repo. Do NOT tag tasks inside a
+                   repo project with their own repo name, that is
+                   redundant since they already live in that project.
+                   Examples: repo:dotfiles, repo:vikunja-mcp.
 
-  project:<name>   Scope to a specific codebase or initiative.
-                   Examples: project:backend, project:mcp, project:dotfiles.
-
-  area:<domain>    Broader life or work area.
-                   Examples: area:infra, area:homelab, area:learning,
-                   area:networking, area:security.
+  area:<domain>    Broader life or work domain.
+                   Examples: area:infra, area:homelab, area:networking,
+                   area:security, area:learning.
 
   source:<where>   Where the information originated, when it matters.
                    Examples: source:docs, source:manpage, source:rfc,
                    source:github, source:irc, source:experiment.
 
   status:<state>   Temporal relevance markers for things that expire.
-                   Examples: status:current, status:outdated, status:blocked.
+                   Examples: status:current, status:outdated,
+                   status:blocked, status:wontfix.
 
 Add new namespaces when you genuinely need one. Keep the format
-namespace:value. If you find yourself wanting a namespace that only has
-one or two entries, consider whether an existing namespace covers it.
+namespace:value. If a candidate namespace would only ever have one
+or two entries, it probably belongs under topic: instead.
 
-The following tags are allowed un-namespaced because they are universal
-workflow labels in a repo context: bug, feature, refactor, docs, chore,
-breaking, p0, p1, p2. Do not use these outside code projects.
+Note on topic: scope. Programming languages, protocols, tools, and
+services all go under topic:. Do not create separate namespaces for
+languages or tools. topic:python, topic:go, topic:bash, topic:nginx
+are all correct.
+
+The following tags are allowed un-namespaced because they are
+universal workflow labels in a repo context:
+  bug, feature, refactor, docs, breaking.
+Do not use these outside code projects.
 
 MEMORY CONVENTIONS
 
@@ -109,13 +123,14 @@ PER REPOSITORY PROJECT CONVENTIONS
     1. get__projects s=<repo_name> to check for an existing project
     2. If missing, put__projects with {"title": "<repo_name>",
        "description": "<repo path or url>"}
-    3. Ensure workflow labels exist: bug, feature, refactor, docs,
-       chore, breaking, p0, p1, p2
+    3. Ensure workflow labels exist: bug, feature, refactor, docs, breaking
 
   Task workflow:
     - Create tasks via put__projects_id_tasks
-    - Every task gets a type label (bug | feature | refactor | docs | chore)
-      and a priority label (p0 | p1 | p2)
+    - Every task gets a type label (bug | feature | refactor | docs)
+    - Use the priority field (1-5) based on how critical the issue is.
+      5 = drop everything, 4 = important, 3 = normal, 2 = low, 1 = trivial.
+      Do NOT use label-based priority. The numeric field is sufficient.
     - Mark done=true when complete. Never delete. History matters.
     - Record implementation notes via put__tasks_taskID_comments
 
@@ -142,7 +157,7 @@ FILTER SYNTAX (CRITICAL)
     Right:  labels = 3
     Right:  labels in 3,5,7
 
-  Text search with `like` against title or description:
+  Text search with like against title or description:
     title like "postgres"
     description like "replication"
 
@@ -162,7 +177,7 @@ WRITE WORKFLOW (STORING A NEW MEMORY)
   1. Decide the tag set. Aim for 2 to 5 labels.
   2. For each tag, call get__labels s=<tag>. If missing, create with
      put__labels using a hex_color by namespace:
-       topic=3b82f6  kind=8b5cf6  lang=06b6d4  project=10b981
+       topic=3b82f6  kind=8b5cf6  repo=10b981
        area=f59e0b   source=6b7280  status=ef4444
      Cache ids for the session.
   3. Resolve the Memory project id once via get__projects s=Memory.
@@ -183,7 +198,7 @@ READ WORKFLOW (RECALLING MEMORIES)
   6. Surface 1-3 matches concisely. Full descriptions only on request.
 
 DEFAULTS
-  priority   1..5, 5 is highest
+  priority   1..5, 5 is highest. Set based on how critical the item is.
   hex_color  6-char hex, no leading hash
   done       false by default
   per_page   keep <= 20 unless a full dump is requested
@@ -195,3 +210,6 @@ SAFETY
   - Confirm before destructive calls (delete, bulk update, label removal)
     when the target is ambiguous.
   - Verify ids by reading first when intent is vague.
+  - Never store secrets, credentials, tokens, or private keys.
+  - Security, password, token, migration, and test-fixture endpoints are
+    not exposed by this MCP.
